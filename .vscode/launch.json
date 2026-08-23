@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Float Notes",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Teams Transcriber",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/teams-transcriber.py",
+      "args": ["live", "--list-devices"],
+      "console": "integratedTerminal"
+    }
+  ]
+}
