@@ -2,6 +2,22 @@
 
 Float Notes is a Windows desktop note-taking app designed for fast capture, clean organization, and local AI assistance. It combines a floating note bubble, Markdown editing, instant screen OCR, AI-powered rewriting, and a built-in Teams meeting transcriber — all while keeping the workflow local and private.
 
+## Screenshots
+
+<div align="center">
+  <img src="docs/image_bubble.png" alt="Float Notes floating bubble" width="720" />
+  <p><em>Floating note bubble ready to capture ideas</em></p>
+
+  <img src="docs/image_expanded_note.png" alt="Expanded note editor" width="720" />
+  <p><em>Expanded note editor with Markdown and ocr tools</em></p>
+
+  <img src="docs/image_light_mode.png" alt="Light mode note view" width="720" />
+  <p><em>Light mode for daytime writing and planning</em></p>
+
+  <img src="docs/image_editing_ai_sugg.png" alt="AI suggestion editing" width="720" />
+  <p><em>AI-assisted rewriting and suggestion flow</em></p>
+</div>
+
 ## Why Float Notes
 
 Most note tools force you to switch context, leave the task you are doing, or depend on cloud services for every action. Float Notes keeps your notes available in a compact floating workspace so you can:
