@@ -116,6 +116,29 @@ def load_model(model_size: str, _fallback: str = "base"):
             print(f"Falling back to '{_fallback}'...\n")
 
 
+# Performance-based model switching: prefer Medium, but switch to Base only when
+# the model is demonstrably too slow for the incoming audio stream.
+LIVE_MODEL_SWITCH_RATIO = 4.0
+LIVE_MODEL_RECOVER_RATIO = 1.5
+LIVE_MODEL_SWITCH_COUNT = 2
+
+
+def _transcription_ratio(processing_seconds: float, audio_seconds: float) -> float:
+    if audio_seconds <= 0:
+        return 0.0
+    return processing_seconds / audio_seconds
+
+
+def _should_switch_model(current_model: str, processing_seconds: float, audio_seconds: float) -> str:
+    """Use live throughput to decide whether the active model is unhealthy."""
+    ratio = _transcription_ratio(processing_seconds, audio_seconds)
+    if current_model == "medium" and ratio >= LIVE_MODEL_SWITCH_RATIO:
+        return "base"
+    if current_model == "base" and ratio <= LIVE_MODEL_RECOVER_RATIO:
+        return "medium"
+    return current_model
+
+
 def transcribe_array(model, audio: np.ndarray, sample_rate: int) -> str:
     """Transcribe a float32 mono numpy array; resamples to 16 kHz if needed."""
     if sample_rate != 16000:
@@ -142,7 +165,7 @@ def list_devices():
     pyaudio = _get_pyaudio()
     p = pyaudio.PyAudio()
     print("\nAvailable input / loopback devices:")
-    print("─" * 58)
+    print("-" * 58)
     for i in range(p.get_device_count()):
         info = p.get_device_info_by_index(i)
         if info.get("maxInputChannels", 0) > 0:
@@ -196,9 +219,12 @@ def live_transcribe(model, chunk_seconds: int, output_file: Path, device_index: 
     print(f"Output  : {output_file}")
     print(f"Audio   : {wav_path}")
     print("\nPress Ctrl+C to stop.\n")
-    print("─" * 58)
+    print("-" * 58)
 
     buffer: list[np.ndarray] = []
+    active_model = "medium"
+    low_ratio_hits = 0
+    high_ratio_hits = 0
 
     def _callback(in_data, frame_count, time_info, status):
         buffer.append(np.frombuffer(in_data, dtype=np.float32).copy())
@@ -237,6 +263,9 @@ def live_transcribe(model, chunk_seconds: int, output_file: Path, device_index: 
             audio = audio.reshape(-1, channels).mean(axis=1).astype(np.float32)
         return transcribe_array(model, audio, sample_rate)
 
+    model_name = active_model
+    model = load_model(model_name, _fallback="base")
+
     output_file.parent.mkdir(parents=True, exist_ok=True)
     wav_writer = wave.open(str(wav_path), "wb")
     wav_writer.setnchannels(1)
@@ -256,16 +285,43 @@ def live_transcribe(model, chunk_seconds: int, output_file: Path, device_index: 
 
                 chunk, buffer[:] = list(buffer), []
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
+                audio_seconds = max(len(chunk) / sample_rate, 1e-6)
+                start = time.perf_counter()
                 print(f"[{ts}] Transcribing ...", end="\r", flush=True)
-
                 _write_wav_chunk(wav_writer, _to_mono16k(chunk))
-
                 text = _flush_text(chunk)
+                elapsed = time.perf_counter() - start
+                ratio = _transcription_ratio(elapsed, audio_seconds)
+
                 if text.strip():
                     line = f"[{ts}]  {text.strip()}"
                     print(line + " " * 20)
                     f.write(line + "\n")
                     f.flush()
+
+                print(f"[{ts}] model={active_model} audio={audio_seconds:.1f}s elapsed={elapsed:.1f}s ratio={ratio:.2f}x")
+
+                if active_model == "medium" and ratio >= LIVE_MODEL_SWITCH_RATIO:
+                    high_ratio_hits += 1
+                    if high_ratio_hits >= LIVE_MODEL_SWITCH_COUNT:
+                        print(f"Medium is too slow ({ratio:.2f}x real time) — switching to base model")
+                        active_model = "base"
+                        model = load_model("base", _fallback="base")
+                        high_ratio_hits = 0
+                        low_ratio_hits = 0
+                else:
+                    high_ratio_hits = 0
+
+                if active_model == "base" and ratio <= LIVE_MODEL_RECOVER_RATIO:
+                    low_ratio_hits += 1
+                    if low_ratio_hits >= LIVE_MODEL_SWITCH_COUNT:
+                        print(f"Base is fast enough ({ratio:.2f}x real time) — retrying medium model")
+                        active_model = "medium"
+                        model = load_model("medium", _fallback="base")
+                        low_ratio_hits = 0
+                        high_ratio_hits = 0
+                else:
+                    low_ratio_hits = 0
 
     except KeyboardInterrupt:
         print("\n\nStopped. Finishing last chunk...")
@@ -298,7 +354,7 @@ def file_transcribe(model, input_path: Path, output_file: Path):
     segments, info = model.transcribe(str(input_path), language="en", beam_size=5)
 
     print(f"Language detected: {info.language}  (confidence: {info.language_probability:.0%})")
-    print("─" * 58)
+    print("-" * 58)
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     with open(output_file, "w", encoding="utf-8") as f:
@@ -339,7 +395,7 @@ def summarize_transcript(transcript_path: Path, output_path: Path):
 
     # Short transcript: single pass is faster and avoids redundant map overhead
     if len(transcript_text) <= _CHUNK_SIZE * 2:
-        print(f"Short transcript ({len(transcript_text)} chars) — single pass.\n")
+        print(f"Short transcript ({len(transcript_text)} chars) - single pass.\n")
         summary = _generate(_SUMMARY_PROMPT.format(transcript=transcript_text[:6000]), max_tokens=600)
     else:
         # Split into fixed-size chunks, then sample evenly up to _MAX_CHUNKS
@@ -423,14 +479,14 @@ def main():
         description="Transcribe MS Teams meetings using local Whisper AI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = parser.add_subparsers(dest="mode", required=True)
+    sub = parser.add_subparsers(dest="mode")
 
     # live
     lp = sub.add_parser("live", help="Real-time transcription from system audio")
     lp.add_argument("--device",       type=int, default=None,
                     help="Audio device index (see --list-devices)")
-    lp.add_argument("--chunk",        type=int, default=30,
-                    help="Seconds per transcription chunk (default: 30)")
+    lp.add_argument("--chunk",        type=int, default=10,
+                    help="Seconds per transcription chunk (default: 10)")
     lp.add_argument("--model",        default="medium",
                     choices=["tiny", "base", "small", "medium", "large-v3"],
                     help="Whisper model (default: medium, fallback: base)")
@@ -455,6 +511,10 @@ def main():
     sp.add_argument("--output", type=str, default=None, help="Summary output path")
 
     args = parser.parse_args()
+    if not args.mode:
+        parser.print_help()
+        print("\nNo mode selected. Choose one of: live, file, summarize")
+        return 0
 
     transcripts_dir = Path("transcripts")
 
@@ -492,4 +552,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

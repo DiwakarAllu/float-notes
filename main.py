@@ -30,7 +30,7 @@ C: dict = {**DARK, **BUB}
 
 FF = "Segoe UI"
 FM = "Cascadia Code"
-W_ICON  = 56
+W_ICON  = 100
 W_PANEL = 300
 H_PANEL = 390
 IDLE_MS = 14_000
@@ -39,6 +39,12 @@ AM      = 11    # ms per frame
 
 DATA_FILE     = Path.home() / ".float_notes" / "notes.json"
 DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _resource_path(*parts: str) -> Path:
+    """Resolve assets from the source tree or the frozen app bundle."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base.joinpath(*parts)
 
 
 # ── Local LLM helpers ──────────────────────────────────────────────────────
@@ -513,10 +519,14 @@ class FloatNotes(tk.Tk):
         self._ai_busy   = False
         self._ai_text   = ""
         self._pulse_i   = 0
+        self._bubble_frames = []
+        self._bubble_label = None
+        self._bubble_frame_index = 0
         # drag state
         self._drag_off       = None     # (ox, oy) offset from window origin
         self._drag_moved    = False
         self._transcriber_proc = None   # running Popen handle when recording
+        self._water_proc = None
 
         self.overrideredirect(True)
         self.attributes("-topmost", True)
@@ -624,6 +634,37 @@ class FloatNotes(tk.Tk):
             self, width=W_ICON, height=W_ICON,
             bg=_TRANSP, highlightthickness=0, cursor="hand2",
         )
+        asset = _resource_path("docs", "AI robo.gif")
+        try:
+            from PIL import Image, ImageSequence, ImageTk
+
+            frames = []
+            if asset.exists():
+                with Image.open(asset) as img:
+                    for frame in ImageSequence.Iterator(img):
+                        frame = frame.convert("RGBA")
+                        frame = frame.resize((W_ICON, W_ICON), Image.LANCZOS)
+                        frames.append(ImageTk.PhotoImage(frame))
+            if frames:
+                self._bubble_frames = frames
+                self._bubble_label = tk.Label(
+                    self._bcanvas,
+                    bg=_TRANSP,
+                    bd=0,
+                    highlightthickness=0,
+                    image=self._bubble_frames[0],
+                )
+                self._bubble_label.image = self._bubble_frames[0]
+                self._bubble_label.bind("<Enter>", self._bubble_enter)
+                self._bubble_label.bind("<Leave>", self._bubble_leave)
+                self._bcanvas.create_window(W_ICON // 2, W_ICON // 2, anchor="center",
+                                            window=self._bubble_label)
+                self._btip = tk.Label(self, text="Float Notes", bg=C["card"],
+                                      fg=C["sub"], font=(FF, 8), padx=6, pady=3)
+                return
+        except Exception:
+            self._bubble_frames = []
+
         r = W_ICON // 2
         self._bshadow = self._bcanvas.create_oval(4,4,W_ICON-4,W_ICON-4, fill=C["bub1"],outline="")
         self._bcirc   = self._bcanvas.create_oval(5,5,W_ICON-5,W_ICON-5, fill=C["bub2"],outline="")
@@ -636,16 +677,35 @@ class FloatNotes(tk.Tk):
         self._bcanvas.bind("<Leave>", self._bubble_leave)
 
     def _bubble_enter(self, _=None):
+        if self._bubble_frames:
+            self._btip.place(relx=0.5, rely=-0.1, anchor="s")
+            self.after(1400, lambda: self._btip.place_forget())
+            return
         self._bcanvas.itemconfig(self._bcirc, fill=C["bub3"])
         self._btip.place(relx=0.5, rely=-0.1, anchor="s")
         self.after(1400, lambda: self._btip.place_forget())
 
     def _bubble_leave(self, _=None):
+        if self._bubble_frames:
+            self._btip.place_forget()
+            return
         self._bcanvas.itemconfig(self._bcirc, fill=C["bub2"])
         self._btip.place_forget()
 
+    def _animate_bubble(self):
+        if self._state != "icon" or not self._bubble_frames or self._bubble_label is None:
+            return
+        self._bubble_frame_index = (self._bubble_frame_index + 1) % len(self._bubble_frames)
+        frame = self._bubble_frames[self._bubble_frame_index]
+        self._bubble_label.configure(image=frame)
+        self._bubble_label.image = frame
+        self.after(80, self._animate_bubble)
+
     def _pulse_step(self):
         if self._state != "icon": return
+        if self._bubble_frames:
+            self._animate_bubble()
+            return
         self._pulse_i += 1
         t = self._pulse_i * 0.05
         s = 1.0 + 0.055 * math.sin(t)
@@ -701,17 +761,41 @@ class FloatNotes(tk.Tk):
         # self._hbtn(right, "✨", self._open_ai_panel, hfg=C["yellow"])
         self._hbtn(right, "📂", self._open_library, hfg=C["teal"])
         self._mode_btn = self._hbtn(right, "👁", self._toggle_mode, hfg=C["purple"])
+        self._water_btn = self._hbtn(right, "💧", self._toggle_water_bro, hfg=C["blue"])
         self._mic_btn  = self._hbtn(right, "🎙", self._toggle_transcriber, hfg=C["teal"])
         self._hbtn(right, "—", self._collapse, hfg=C["sub"])
         self._hbtn(right, "✕", self.destroy,   hfg=C["red"])
 
     def _toggle_transcriber(self):
+        if self._transcriber_proc and self._transcriber_proc.poll() is None:
+            try:
+                self._transcriber_proc.terminate()
+                self._transcriber_proc.wait(timeout=5)
+            except Exception:
+                pass
+            self._transcriber_proc = None
+            self._mic_btn.configure(fg=C["overlay"])
+            self._set_ai_status("Teams transcriber stopped")
+            return
+
         base = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
         # prefer TeamsTranscriber.exe (distributed alongside FloatNotes.exe)
         exe = Path(sys.executable).parent / "TeamsTranscriber.exe"
         if exe.exists():
-            os.startfile(str(exe))
-            return
+            try:
+                creation_flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                self._transcriber_proc = subprocess.Popen(
+                    [str(exe), "live"],
+                    cwd=str(exe.parent),
+                    creationflags=creation_flags,
+                )
+                self._mic_btn.configure(fg=C["green"])
+                self._set_ai_status("Teams transcriber started")
+                self.after(1000, self._poll_transcriber)
+                return
+            except OSError as exc:
+                self._set_ai_status(f"Could not start transcriber: {exc}")
+                return
 
         shortcut = base / "Teams Transcriber.lnk"
         if shortcut.exists():
@@ -736,6 +820,61 @@ class FloatNotes(tk.Tk):
         except OSError as exc:
             self._set_ai_status(f"Could not start transcriber: {exc}")
 
+    def _toggle_water_bro(self):
+        if self._water_proc and self._water_proc.poll() is None:
+            try:
+                self._water_proc.terminate()
+                self._water_proc.wait(timeout=5)
+            except Exception:
+                pass
+            self._water_proc = None
+            self._water_btn.configure(fg=C["overlay"])
+            self._set_ai_status("Water Bro stopped")
+            return
+
+        project_root = Path(__file__).resolve().parent.parent
+        candidates = [
+            Path(sys.executable).parent / "WaterPal.exe",
+            project_root / "water-bro" / "dist" / "WaterPal.exe",
+            project_root / "water-bro" / "WaterPal.exe",
+            project_root / "water-bro" / "build" / "WaterPal.exe",
+        ]
+        exe = next((p for p in candidates if p.exists()), None)
+        if exe is not None:
+            try:
+                creation_flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                self._water_proc = subprocess.Popen(
+                    [str(exe)],
+                    cwd=str(exe.parent),
+                    creationflags=creation_flags,
+                )
+                self._water_btn.configure(fg=C["blue"])
+                self._set_ai_status("Water Bro started")
+                self.after(1000, self._poll_water_bro)
+                return
+            except OSError as exc:
+                self._set_ai_status(f"Could not start Water Bro: {exc}")
+                return
+
+        script = project_root / "water-bro" / "app.py"
+        if script.exists():
+            try:
+                creation_flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                self._water_proc = subprocess.Popen(
+                    [sys.executable, str(script)],
+                    cwd=str(script.parent),
+                    creationflags=creation_flags,
+                )
+                self._water_btn.configure(fg=C["blue"])
+                self._set_ai_status("Water Bro started")
+                self.after(1000, self._poll_water_bro)
+                return
+            except OSError as exc:
+                self._set_ai_status(f"Could not start Water Bro: {exc}")
+                return
+
+        self._set_ai_status("Water Bro app not found")
+
     def _poll_transcriber(self):
         """Reset mic button colour when the transcriber process exits."""
         if self._transcriber_proc and self._transcriber_proc.poll() is None:
@@ -743,6 +882,14 @@ class FloatNotes(tk.Tk):
         else:
             self._mic_btn.configure(fg=C["overlay"])
             self._transcriber_proc = None
+
+    def _poll_water_bro(self):
+        """Reset water button colour when the Water Bro process exits."""
+        if self._water_proc and self._water_proc.poll() is None:
+            self.after(1000, self._poll_water_bro)
+        else:
+            self._water_btn.configure(fg=C["overlay"])
+            self._water_proc = None
 
     def _hbtn(self, parent, text, cmd, hfg=None):
         b = tk.Label(parent, text=text, bg=C["header"], fg=C["overlay"],

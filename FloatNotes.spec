@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('docs\\AI robo.gif', 'docs')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
